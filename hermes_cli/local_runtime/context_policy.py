@@ -292,9 +292,10 @@ def spill_overrides(profile: ModelProfile, spill_bytes: int | None = None) -> li
 
 def launch_args(profile: ModelProfile, decision: WindowDecision, *, flash_attention: bool = True,
                 mtp_capable: bool = False, mtp_draft_depth: int = 3, uma: bool = False,
-                mtp_prefill: bool = False) -> list[str]:
+                mtp_prefill: bool = False, cache_type_k: str = "q8_0", cache_type_v: str = "q8_0",
+                kv_offload: bool = True, gpu_layers: str | None = None) -> list[str]:
     """Per-model launch flags from a window decision. Explicit -c puts fit into
-    spill-weights-and-hold-ctx; q8 KV cache wherever flash attention exists; -ot placement on
+    spill-weights-and-hold-ctx; q8/q4 KV cache wherever flash attention exists; -ot placement on
     spilled configs — DISCRETE cards only."""
     args = ["-c", str(decision.window)]
     if mtp_capable:
@@ -305,7 +306,11 @@ def launch_args(profile: ModelProfile, decision: WindowDecision, *, flash_attent
     else:
         args += ["-b", str(PREFILL_UBATCH), "-ub", str(PREFILL_UBATCH)]
     if flash_attention:
-        args += ["-ctk", "q8_0", "-ctv", "q8_0", "-fa", "on"]
+        args += ["-ctk", cache_type_k, "-ctv", cache_type_v, "-fa", "on"]
+    if kv_offload:
+        args += ["-kvo", "on"]
+    if gpu_layers:
+        args += ["-ngl", str(gpu_layers)]
     if decision.spilled and not uma:
         args += spill_overrides(profile, decision.spill_bytes)
     return args
