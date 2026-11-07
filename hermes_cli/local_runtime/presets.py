@@ -22,6 +22,8 @@ _FLAG_TO_KEY = {
     "-c": "ctx-size", "-b": "batch-size", "-ub": "ubatch-size",
     "-ctk": "cache-type-k", "-ctv": "cache-type-v", "-fa": "flash-attn",
     "-ot": "override-tensor", "--spec-type": "spec-type", "--spec-draft-n-max": "spec-draft-n-max",
+    "-ngl": "gpu-layers", "-kvo": "kv-offload", "--moe-cache-mib": "moe-cache-mib",
+    "-np": "parallel", "-cram": "cache-ram",
 }
 
 
@@ -210,16 +212,40 @@ def preset_for_model(gguf: Path, budget: HardwareBudget,
     if dflash is not None:
         plan, decision = dflash, dflash.decision
     # Router discovery is preset-only: refused files must never autoload with stock fit.
+    try:
+        from hermes_cli.config import load_config_readonly
+        lr_cfg = (load_config_readonly().get("local_runtime") or {})
+    except Exception:
+        lr_cfg = {}
+
+    ctk = lr_cfg.get("kv_cache_type", "q4_0")
+    ctv = lr_cfg.get("kv_cache_type", "q4_0")
+    gpu_layers_cfg = lr_cfg.get("gpu_layers", "all" if not budget.uma else None)
+
     keys = _args_to_keys(launch_args(
         profile, decision, mtp_capable=is_mtp and dflash is None, uma=budget.uma,
         mtp_prefill=plan.mtp_prefill,
-        mtp_draft_depth=entry.mtp_draft_depth if entry is not None else 3))
+        mtp_draft_depth=entry.mtp_draft_depth if entry is not None else 3,
+        cache_type_k=ctk, cache_type_v=ctv,
+        kv_offload=True, gpu_layers=gpu_layers_cfg))
     keys["model"] = str(gguf)
     from hermes_cli.local_runtime.hardware import prompt_cache_bytes
     cache = prompt_cache_bytes(live, footprint_bytes(plan.profile, decision.window,
                                                      overhead_bytes=plan.overhead_bytes), residents)
     if cache is not None:
         keys["cache-ram"] = str(cache >> 20)  # MiB; 0 turns the cache off
+    elif not budget.uma:
+        # On discrete GPUs, prevent llama-server from wasting 8GB of system RAM on host prompt caching
+        keys["cache-ram"] = str(lr_cfg.get("cache_ram_mib", 0))
+
+    if not budget.uma and profile.moe:
+        moe_cache = lr_cfg.get("moe_cache_mib", 1536)
+        if moe_cache:
+            keys["moe-cache-mib"] = str(moe_cache)
+
+    parallel_cfg = lr_cfg.get("parallel", 1)
+    if parallel_cfg:
+        keys["parallel"] = str(parallel_cfg)
     if profile.lazy_bytes:
         # The price above leaves these tensors on disk; llama.cpp's own default loads them on
         # integrated GPUs.
